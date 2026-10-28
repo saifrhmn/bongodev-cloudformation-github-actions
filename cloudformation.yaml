@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: bongoDev classroom demo - Ubuntu 24.04 LTS + Nginx website with a new VPC
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Environment name shown on the website and resource tags
+
+  LatestUbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/noble/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Official Ubuntu 24.04 LTS (Noble) x86_64 AMI parameter from Canonical
+
+Resources:
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.42.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTP on port 80 for short classroom demo; no SSH access
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP for Nginx demo
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-http-sg'
+
+  UbuntuNginxServer:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - DefaultRoute
+      - PublicRouteAssociation
+    Properties:
+      ImageId: !Ref LatestUbuntuAmiId
+      InstanceType: t3.micro
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-${Environment}-nginx'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Course
+          Value: bongoDev-DevOps
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/bongodev-bootstrap.log | logger -t user-data -s 2>/dev/console) 2>&1
+          export DEBIAN_FRONTEND=noninteractive
+
+          # On Ubuntu, use apt-get (NOT dnf, which is for Amazon Linux 2023).
+          apt-get update -y
+          apt-get install -y nginx
+
+          # Create the demo site in Ubuntu's standard Nginx document root.
+          cat > /var/www/html/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>bongoDev - IaC Live Demo</title>
+            <style>
+              body { font-family: Arial, sans-serif; background: #f4f7fb; text-align: center; padding: 70px 20px; color: #14243a; }
+              .card { margin: auto; background: white; padding: 35px; border-radius: 16px; max-width: 650px; box-shadow: 0 8px 30px #dce4ed; }
+              h1 { color: #1c64b5; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>Hello from bongoDev!</h1>
+              <h2>Infrastructure as Code is working!</h2>
+              <p><strong>Ubuntu 24.04 LTS + Nginx + AWS CloudFormation</strong></p>
+              <p>Environment: <strong>${Environment}</strong></p>
+              <p>Provisioned with YAML. No manual EC2 installation.</p>
+            </div>
+          </body>
+          </html>
+          EOF
+
+          nginx -t
+          systemctl enable --now nginx
+          systemctl is-active --quiet nginx
+          echo 'bongoDev Nginx user-data setup completed successfully'
+
+Outputs:
+  WebsiteURL:
+    Description: Open this HTTP URL after EC2 bootstrap completes
+    Value: !Sub 'http://${UbuntuNginxServer.PublicIp}'
+  InstanceId:
+    Description: EC2 instance launched by CloudFormation
+    Value: !Ref UbuntuNginxServer
+  PublicIPAddress:
+    Description: Public IPv4 address of the Ubuntu Nginx server
+    Value: !GetAtt UbuntuNginxServer.PublicIp
+  VpcId:
+    Description: Newly created VPC
+    Value: !Ref DemoVPC

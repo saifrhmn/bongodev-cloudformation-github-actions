@@ -1,0 +1,68 @@
+# bongoDev homework: Git push -> GitHub Actions -> CloudFormation -> Ubuntu + Nginx
+# AWS access uses GitHub OIDC, NOT permanent AWS access keys.
+name: Deploy Ubuntu Nginx with CloudFormation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - cloudformation.yaml
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+# Minimum GitHub token permissions required for checkout and AWS OIDC.
+permissions:
+  id-token: write
+  contents: read
+
+# Avoid two stack operations racing against each other.
+concurrency:
+  group: bongodev-cloudformation-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Validate and deploy infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STACK_NAME: bongodev-github-iac-dev
+      AWS_REGION: ${{ vars.AWS_REGION }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure temporary AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: bongodev-iac-lab
+
+      - name: Confirm AWS identity
+        run: aws sts get-caller-identity --query '{Account:Account,Arn:Arn}' --output json
+
+      - name: Validate CloudFormation template
+        run: aws cloudformation validate-template --template-body file://cloudformation.yaml --region "$AWS_REGION"
+
+      - name: Create or update CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation.yaml \
+            --stack-name "$STACK_NAME" \
+            --parameter-overrides Environment=dev \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
+      - name: Print website and infrastructure outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output table
+
+      - name: Lab completion message
+        run: echo 'The stack is deployed. EC2 User Data may need additional minutes to install Nginx.'
